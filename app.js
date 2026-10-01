@@ -7,6 +7,9 @@ const API_URL = "https://api.anthropic.com/v1/messages";
 const MAX_HANDOUT_CHARS = 250000;
 const PHRASE_WORDS = 10;
 const PAUSE_MS = 1200;
+const LIVE_CARDS = 4;       // paragraph cards kept on screen in the live view
+const PARA_GAP_MS = 2500;   // a silence this long starts a new paragraph
+const PARA_MAX_WORDS = 60;  // hard cap: a paragraph this long is closed at the next phrase
 
 const settings = {
   key: localStorage.getItem("key") || "",
@@ -172,9 +175,7 @@ async function openSession(s) {
   session = s;
   localStorage.setItem("currentSession", String(s.id));
   $("session-title").textContent = `当前课程：${s.title}`;
-  subList.replaceChildren();
-  s.entries.forEach((entry) => makeBox(entry));
-  subList.scrollTop = subList.scrollHeight;
+  renderCards(true);
 }
 
 $("btn-new").onclick = async () => {
@@ -226,62 +227,113 @@ function buildSystem() {
     "Then translate the corrected segment. Each segment is a fragment of continuous speech and may start or end mid-sentence; translate it fluently as a continuation of the previous speech, without repeating earlier translations.",
     "Translate ONLY the words that are in the segment. Never complete the sentence, never anticipate what the lecturer will say next, and never add content from the handout, even if the segment is the beginning of a sentence you recognise from the handout. The handout is only for correcting recognition errors in terms. The next words will arrive as the next segment.",
     "Use standard Chinese terminology of the subject. Keep formulas and symbols as written.",
+    "The translations are displayed in paragraph cards, so also judge paragraph breaks. Answer NEW: yes only if this segment starts a new paragraph, that is, the previous sentence is complete and the lecturer moves on to a new idea, definition, example, step or topic, or the current paragraph already holds two or three sentences (about 35 words) and this segment starts a new sentence. Answer NEW: no if the segment continues an unfinished sentence or the same idea. Prefer short paragraphs: each should be one complete thought, and never longer than about 45 words.",
     "Reply in exactly this format, with no other text:",
     "EN: <corrected English segment>",
     "ZH: <Chinese translation>",
+    "NEW: <yes or no>",
     handout ? `\nHandout briefing:\n${handout}` : "",
   ].join("\n");
 }
 
 const saveSession = (s) => dbPut("sessions", s);
 
-function makeBox(entry) {
-  const box = document.createElement("div");
-  box.className = "sub";
-  box.innerHTML = '<div class="zh"></div><div class="en"></div>';
-  box.querySelector(".en").textContent = entry.en;
-  setZh(box, entry.zh || "…", !entry.zh);
-  const nearBottom = subList.scrollHeight - subList.scrollTop - subList.clientHeight < 80;
-  subList.appendChild(box);
-  if (nearBottom) subList.scrollTop = subList.scrollHeight;
-  return box;
+// Groups phrases into paragraphs. A new paragraph starts after a long silence (gap), where the
+// model judged a new idea begins (brk), or when the current one reaches the length cap.
+function groupParagraphs(entries) {
+  const groups = [];
+  let words = 0;
+  for (const e of entries) {
+    if (!groups.length || e.gap || e.brk || words >= PARA_MAX_WORDS) {
+      groups.push([]);
+      words = 0;
+    }
+    groups[groups.length - 1].push(e);
+    words += e.en.split(/\s+/).length;
+  }
+  return groups;
 }
 
-function setZh(box, text, pending = false, error = false) {
-  const zh = box.querySelector(".zh");
-  zh.textContent = text;
-  zh.classList.toggle("pending", pending);
-  zh.classList.toggle("error", error);
+// Redraws the paragraph cards of the current session from its entries.
+function renderCards(toEnd = false) {
+  const nearBottom = subList.scrollHeight - subList.scrollTop - subList.clientHeight < 80;
+  const cards = groupParagraphs(session.entries).map((group) => {
+    const card = document.createElement("div");
+    card.className = "sub";
+    const zh = document.createElement("div");
+    zh.className = "zh";
+    const en = document.createElement("div");
+    en.className = "en";
+    for (const e of group) {
+      const span = document.createElement("span");
+      span.textContent = e.err || e.zh || "…";
+      if (e.err) span.className = "error";
+      else if (!e.zh) span.className = "pending";
+      zh.appendChild(span);
+      en.append(`${e.en} `);
+    }
+    card.append(zh, en);
+    return card;
+  });
+  subList.replaceChildren(...cards);
+  layoutCards();
+  if (toEnd || nearBottom) scrollReviewToEnd();
 }
+
+// Marks each card with its distance from the newest one. The live view orders (newest first),
+// styles and hides cards by it.
+function layoutCards() {
+  const n = subList.children.length;
+  for (let i = 0; i < n; i++) {
+    const age = n - 1 - i;
+    const card = subList.children[i];
+    card.dataset.age = age < LIVE_CARDS ? age : "gone";
+    card.style.order = age;
+  }
+}
+
+// Only the review view scrolls; the live view always shows its top.
+function scrollReviewToEnd() {
+  if (subList.classList.contains("review")) subList.scrollTop = subList.scrollHeight;
+}
+
+let lastResultAt = 0;     // time of the latest recognition result
+let startNewPara = false; // set when a long silence preceded the next phrase
 
 function enqueue(en) {
   const owner = session;
-  const context = owner.entries.slice(-3).map((s) => s.en).join(" ");
-  const entry = { en, zh: "" };
+  const groups = groupParagraphs(owner.entries);
+  const entry = { en, zh: "", gap: startNewPara };
+  startNewPara = false;
+  const paragraph = entry.gap || !groups.length ? "" : groups[groups.length - 1].map((e) => e.en).join(" ");
+  const context = owner.entries.slice(-3).map((e) => e.en).join(" ");
   owner.entries.push(entry);
-  translate(owner, entry, makeBox(entry), context);
+  renderCards();
+  translate(owner, entry, context, paragraph);
 }
 
-async function translate(owner, entry, box, context) {
+async function translate(owner, entry, context, paragraph) {
   try {
     const reply = await claude({
       model: settings.translateModel,
       system: buildSystem(),
-      user: `Previous speech (context only, do not translate):\n${context || "(none)"}\n\nCorrect and translate this segment (only these words, do not complete the sentence):\n${entry.en}`,
+      user: [
+        `Previous speech (context only, do not translate):\n${context || "(none)"}`,
+        `Current paragraph so far (English, before this segment):\n${paragraph || "(none: this segment starts a new paragraph)"}`,
+        `Correct and translate this segment (only these words, do not complete the sentence):\n${entry.en}`,
+      ].join("\n\n"),
       maxTokens: 500,
     });
-    const match = reply.match(/^EN:\s*(.*?)\s*\n\s*ZH:\s*([\s\S]+)$/);
+    const match = reply.match(/^EN:\s*(.*?)\s*\n\s*ZH:\s*([\s\S]*?)\s*\n\s*NEW:\s*(yes|no)\s*$/i);
     if (!match) throw new Error(`模型返回格式不对：${reply}`);
     entry.en = match[1];
     entry.zh = match[2].trim();
+    entry.brk = match[3].toLowerCase() === "yes";
     await saveSession(owner);
-    box.querySelector(".en").textContent = entry.en;
-    setZh(box, entry.zh);
   } catch (err) {
-    setZh(box, `翻译失败：${err.message}`, false, true);
+    entry.err = `翻译失败：${err.message}`;
   }
-  const nearBottom = subList.scrollHeight - subList.scrollTop - subList.clientHeight < 120;
-  if (nearBottom) subList.scrollTop = subList.scrollHeight;
+  if (owner === session) renderCards();
 }
 
 // ---------- Speech recognition ----------
@@ -330,6 +382,9 @@ function beginRecognition() {
   recognition.continuous = true;
   recognition.interimResults = true;
   recognition.onresult = (e) => {
+    const now = Date.now();
+    if (lastResultAt && now - lastResultAt > PARA_GAP_MS) startNewPara = true;
+    lastResultAt = now;
     for (let i = e.resultIndex; i < e.results.length; i++) {
       const text = e.results[i][0].transcript;
       dispatch(i, text, e.results[i].isFinal);
@@ -437,6 +492,10 @@ $("btn-summary-copy").onclick = async () => {
 
 // ---------- Misc controls ----------
 $("chk-en").addEventListener("change", (e) => subList.classList.toggle("hide-en", !e.target.checked));
+$("chk-review").addEventListener("change", (e) => {
+  subList.classList.toggle("review", e.target.checked);
+  subList.scrollTop = e.target.checked ? subList.scrollHeight : 0;
+});
 
 // ---------- Settings ----------
 $("btn-settings").onclick = () => {
