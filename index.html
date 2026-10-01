@@ -12,11 +12,13 @@
 <header>
   <button id="btn-record" class="primary">开始听课</button>
   <button id="btn-summary">课堂总结</button>
+  <button id="btn-new">新课</button>
+  <button id="btn-history">历史</button>
   <button id="btn-handouts">讲义</button>
   <button id="btn-settings">设置</button>
   <label class="chk"><input type="checkbox" id="chk-en" checked> 英文</label>
-  <button id="btn-clear">清空</button>
 </header>
+<div id="session-title"></div>
 
 <div id="sub-list"></div>
 <div id="interim"></div>
@@ -38,17 +40,24 @@
 
 <dialog id="dlg-handouts">
   <h3>讲义</h3>
-  <p class="hint">上传上课会用到的 PDF。程序会提取术语和内容要点，让翻译更准确。</p>
+  <p class="hint">上传上课会用到的 PDF。只有勾选的讲义会参与翻译和总结，上哪门课就勾选哪门。</p>
   <label class="file-btn">上传 PDF（可多选）<input type="file" id="file-pdf" accept="application/pdf" multiple hidden></label>
   <ul id="doc-list"></ul>
   <menu><button id="btn-handouts-close">关闭</button></menu>
 </dialog>
 
+<dialog id="dlg-history">
+  <h3>历史课程</h3>
+  <ul id="session-list"></ul>
+  <menu><button id="btn-history-close">关闭</button></menu>
+</dialog>
+
 <dialog id="dlg-summary">
-  <h3>课堂总结</h3>
+  <h3 id="summary-title">课堂总结</h3>
   <div id="summary-body"></div>
   <menu>
     <button id="btn-summary-copy">复制</button>
+    <button id="btn-summary-redo">重新生成</button>
     <button id="btn-summary-close">关闭</button>
   </menu>
 </dialog>

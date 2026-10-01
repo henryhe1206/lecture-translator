@@ -15,8 +15,9 @@ const settings = {
   lang: localStorage.getItem("lang") || "en-GB",
 };
 
-let docs = []; // { name, digest }
-const transcript = JSON.parse(localStorage.getItem("transcript") || "[]"); // { en, zh }
+let docs = [];      // { name, digest, enabled }
+let sessions = [];  // { id, title, created, entries: [{ en, zh }], summary }
+let session = null; // the session currently being recorded / displayed
 
 // ---------- UI helpers ----------
 let statusTimer;
@@ -28,27 +29,31 @@ function status(msg, ms = 3000) {
   if (ms) statusTimer = setTimeout(() => el.classList.remove("show"), ms);
 }
 
-// ---------- IndexedDB (handouts) ----------
+// ---------- IndexedDB ----------
 function openDb() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open("lecture-handouts", 1);
-    req.onupgradeneeded = () => req.result.createObjectStore("docs", { keyPath: "name" });
+    const req = indexedDB.open("lecture-handouts", 2);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains("docs")) db.createObjectStore("docs", { keyPath: "name" });
+      if (!db.objectStoreNames.contains("sessions")) db.createObjectStore("sessions", { keyPath: "id" });
+    };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 }
-async function dbRun(mode, fn) {
+async function dbRun(store, mode, fn) {
   const db = await openDb();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction("docs", mode);
-    const req = fn(tx.objectStore("docs"));
+    const tx = db.transaction(store, mode);
+    const req = fn(tx.objectStore(store));
     tx.oncomplete = () => resolve(req.result);
     tx.onerror = () => reject(tx.error);
   });
 }
-const dbAll = () => dbRun("readonly", (s) => s.getAll());
-const dbPut = (doc) => dbRun("readwrite", (s) => s.put(doc));
-const dbDelete = (name) => dbRun("readwrite", (s) => s.delete(name));
+const dbAll = (store) => dbRun(store, "readonly", (s) => s.getAll());
+const dbPut = (store, value) => dbRun(store, "readwrite", (s) => s.put(value));
+const dbDelete = (store, key) => dbRun(store, "readwrite", (s) => s.delete(key));
 
 // ---------- Claude ----------
 async function claude({ model, system, user, maxTokens }) {
@@ -99,21 +104,31 @@ function makeDigest(text) {
   });
 }
 
+const activeDocs = () => docs.filter((d) => d.enabled);
+const handoutBriefing = () => activeDocs().map((d) => `## ${d.name}\n${d.digest}`).join("\n\n");
+
 function renderDocs() {
   const list = $("doc-list");
   list.replaceChildren();
   for (const d of docs) {
     const li = document.createElement("li");
-    li.innerHTML = '<span class="name"></span><span class="state">要点已生成</span><button>删除</button>';
+    li.innerHTML = '<input type="checkbox"><span class="name"></span><button>删除</button>';
+    const box = li.querySelector("input");
+    box.checked = d.enabled;
+    box.onchange = async () => {
+      d.enabled = box.checked;
+      await dbPut("docs", d);
+      renderDocs();
+    };
     li.querySelector(".name").textContent = d.name;
     li.querySelector("button").onclick = async () => {
-      await dbDelete(d.name);
+      await dbDelete("docs", d.name);
       docs = docs.filter((x) => x.name !== d.name);
       renderDocs();
     };
     list.appendChild(li);
   }
-  $("btn-handouts").textContent = docs.length ? `讲义 (${docs.length})` : "讲义";
+  $("btn-handouts").textContent = docs.length ? `讲义 (${activeDocs().length}/${docs.length})` : "讲义";
 }
 
 $("file-pdf").addEventListener("change", async (e) => {
@@ -125,8 +140,8 @@ $("file-pdf").addEventListener("change", async (e) => {
     try {
       status(`正在处理 ${file.name}…`, 0);
       const digest = await makeDigest(await extractText(file));
-      const doc = { name: file.name, digest };
-      await dbPut(doc);
+      const doc = { name: file.name, digest, enabled: true };
+      await dbPut("docs", doc);
       docs = docs.filter((x) => x.name !== doc.name).concat(doc);
       renderDocs();
       status(`${file.name} 已处理`);
@@ -139,15 +154,78 @@ $("file-pdf").addEventListener("change", async (e) => {
 $("btn-handouts").onclick = () => $("dlg-handouts").showModal();
 $("btn-handouts-close").onclick = () => $("dlg-handouts").close();
 
+// ---------- Sessions ----------
+const subList = $("sub-list");
+
+function defaultTitle() {
+  return new Date().toLocaleString("zh-CN", { hour12: false });
+}
+
+async function createSession(title) {
+  const s = { id: Date.now(), title, created: Date.now(), entries: [], summary: "" };
+  await dbPut("sessions", s);
+  sessions.push(s);
+  return s;
+}
+
+async function openSession(s) {
+  session = s;
+  localStorage.setItem("currentSession", String(s.id));
+  $("session-title").textContent = `当前课程：${s.title}`;
+  subList.replaceChildren();
+  s.entries.forEach((entry) => makeBox(entry));
+  subList.scrollTop = subList.scrollHeight;
+}
+
+$("btn-new").onclick = async () => {
+  const title = prompt("这节课的名称（例如：数学 Lecture 3）", defaultTitle());
+  if (title === null) return;
+  await openSession(await createSession(title.trim() || defaultTitle()));
+};
+
+function renderSessions() {
+  const list = $("session-list");
+  list.replaceChildren();
+  for (const s of [...sessions].sort((a, b) => b.created - a.created)) {
+    const li = document.createElement("li");
+    li.innerHTML = '<span class="name"><span class="t"></span><span class="meta"></span></span><button class="open">打开</button><button class="sum">总结</button><button class="del">删除</button>';
+    li.querySelector(".t").textContent = s.id === session.id ? `${s.title}（当前）` : s.title;
+    li.querySelector(".meta").textContent = `${new Date(s.created).toLocaleString("zh-CN", { hour12: false })} · ${s.entries.length} 段${s.summary ? " · 已有总结" : ""}`;
+    li.querySelector(".open").onclick = async () => {
+      await openSession(s);
+      $("dlg-history").close();
+    };
+    li.querySelector(".sum").onclick = () => {
+      $("dlg-history").close();
+      showSummary(s);
+    };
+    li.querySelector(".del").onclick = async () => {
+      if (!confirm(`删除“${s.title}”？`)) return;
+      await dbDelete("sessions", s.id);
+      sessions = sessions.filter((x) => x.id !== s.id);
+      if (s.id === session.id) await openSession(await createSession(defaultTitle()));
+      renderSessions();
+    };
+    list.appendChild(li);
+  }
+}
+
+$("btn-history").onclick = () => {
+  renderSessions();
+  $("dlg-history").showModal();
+};
+$("btn-history-close").onclick = () => $("dlg-history").close();
+
 // ---------- Translation ----------
 function buildSystem() {
-  const handout = docs.map((d) => `## ${d.name}\n${d.digest}`).join("\n\n");
+  const handout = handoutBriefing();
   return [
-    "You are a simultaneous interpreter at a university mathematics lecture, translating English speech into Simplified Chinese.",
+    "You are a simultaneous interpreter at a university lecture, translating English speech into Simplified Chinese.",
     "The input is automatic speech recognition output. The recogniser often replaces technical terms with similar-sounding ordinary words (for example 'investors' for 'inverses', 'ortho final' for 'orthogonal', 'dot protect' for 'dot product').",
-    "First correct the segment: if a word makes no sense in a mathematics lecture, replace it with the most similar-sounding term that fits the context, using the handout briefing, the previous speech and your mathematical knowledge. Change as little as possible; do not rewrite correct words.",
+    "First correct the segment: if a word makes no sense in the subject of the lecture, replace it with the most similar-sounding term that fits the context, using the handout briefing, the previous speech and your subject knowledge. Change as little as possible; do not rewrite correct words.",
     "Then translate the corrected segment. Each segment is a fragment of continuous speech and may start or end mid-sentence; translate it fluently as a continuation of the previous speech, without repeating earlier translations.",
-    "Use standard Chinese mathematical terminology. Keep formulas and symbols as written.",
+    "Translate ONLY the words that are in the segment. Never complete the sentence, never anticipate what the lecturer will say next, and never add content from the handout, even if the segment is the beginning of a sentence you recognise from the handout. The handout is only for correcting recognition errors in terms. The next words will arrive as the next segment.",
+    "Use standard Chinese terminology of the subject. Keep formulas and symbols as written.",
     "Reply in exactly this format, with no other text:",
     "EN: <corrected English segment>",
     "ZH: <Chinese translation>",
@@ -155,11 +233,7 @@ function buildSystem() {
   ].join("\n");
 }
 
-const subList = $("sub-list");
-
-function persist() {
-  localStorage.setItem("transcript", JSON.stringify(transcript));
-}
+const saveSession = (s) => dbPut("sessions", s);
 
 function makeBox(entry) {
   const box = document.createElement("div");
@@ -181,26 +255,26 @@ function setZh(box, text, pending = false, error = false) {
 }
 
 function enqueue(en) {
-  const context = transcript.slice(-3).map((s) => s.en).join(" ");
+  const owner = session;
+  const context = owner.entries.slice(-3).map((s) => s.en).join(" ");
   const entry = { en, zh: "" };
-  transcript.push(entry);
-  const box = makeBox(entry);
-  translate(entry, box, context);
+  owner.entries.push(entry);
+  translate(owner, entry, makeBox(entry), context);
 }
 
-async function translate(entry, box, context) {
+async function translate(owner, entry, box, context) {
   try {
     const reply = await claude({
       model: settings.translateModel,
       system: buildSystem(),
-      user: `Previous speech (context only, do not translate):\n${context || "(none)"}\n\nCorrect and translate this segment:\n${entry.en}`,
+      user: `Previous speech (context only, do not translate):\n${context || "(none)"}\n\nCorrect and translate this segment (only these words, do not complete the sentence):\n${entry.en}`,
       maxTokens: 500,
     });
     const match = reply.match(/^EN:\s*(.*?)\s*\n\s*ZH:\s*([\s\S]+)$/);
     if (!match) throw new Error(`模型返回格式不对：${reply}`);
     entry.en = match[1];
     entry.zh = match[2].trim();
-    persist();
+    await saveSession(owner);
     box.querySelector(".en").textContent = entry.en;
     setZh(box, entry.zh);
   } catch (err) {
@@ -312,20 +386,19 @@ document.addEventListener("visibilitychange", () => {
 });
 
 // ---------- Summary ----------
-$("btn-summary").onclick = async () => {
-  if (!settings.key) return status("请先在设置里填写 API Key");
-  if (!transcript.length) return status("还没有听课记录");
+let summaryTarget = null;
+
+async function generateSummary(s) {
   const body = $("summary-body");
   body.textContent = "正在生成总结…";
-  $("dlg-summary").showModal();
   try {
-    const handout = docs.map((d) => `## ${d.name}\n${d.digest}`).join("\n\n");
-    body.textContent = await claude({
+    const handout = handoutBriefing();
+    s.summary = await claude({
       model: settings.summaryModel,
       maxTokens: 4000,
       system: "You summarise university lectures for a student, in Simplified Chinese.",
       user: [
-        "Below is the automatic speech transcript of a lecture (English, may contain recognition errors in mathematical terms) and, if available, a briefing on the lecture handouts.",
+        "Below is the automatic speech transcript of a lecture (English, corrected where possible but it may still contain recognition errors in technical terms) and, if available, a briefing on the lecture handouts.",
         "Write a clear summary in Simplified Chinese with these sections:",
         "1. 本课主题",
         "2. 核心知识点（定义、公式、定理，公式保持原样书写）",
@@ -334,13 +407,28 @@ $("btn-summary").onclick = async () => {
         "5. 课后需要复习的内容",
         "Only include what the lecturer actually said; do not add material from the handout that was not covered.",
         handout ? `\nHandout briefing:\n${handout}` : "",
-        `\nTranscript:\n${transcript.map((s) => s.en).join(" ")}`,
+        `\nTranscript:\n${s.entries.map((x) => x.en).join(" ")}`,
       ].join("\n"),
     });
+    await saveSession(s);
+    if (summaryTarget === s) body.textContent = s.summary;
   } catch (err) {
-    body.textContent = `总结失败：${err.message}`;
+    if (summaryTarget === s) body.textContent = `总结失败：${err.message}`;
   }
-};
+}
+
+function showSummary(s) {
+  if (!settings.key) return status("请先在设置里填写 API Key");
+  if (!s.entries.length) return status("这节课还没有听课记录");
+  summaryTarget = s;
+  $("summary-title").textContent = `课堂总结：${s.title}`;
+  $("dlg-summary").showModal();
+  if (s.summary) $("summary-body").textContent = s.summary;
+  else generateSummary(s);
+}
+
+$("btn-summary").onclick = () => showSummary(session);
+$("btn-summary-redo").onclick = () => generateSummary(summaryTarget);
 $("btn-summary-close").onclick = () => $("dlg-summary").close();
 $("btn-summary-copy").onclick = async () => {
   await navigator.clipboard.writeText($("summary-body").textContent);
@@ -349,12 +437,6 @@ $("btn-summary-copy").onclick = async () => {
 
 // ---------- Misc controls ----------
 $("chk-en").addEventListener("change", (e) => subList.classList.toggle("hide-en", !e.target.checked));
-$("btn-clear").onclick = () => {
-  if (!confirm("清空所有听课记录？")) return;
-  transcript.length = 0;
-  persist();
-  subList.replaceChildren();
-};
 
 // ---------- Settings ----------
 $("btn-settings").onclick = () => {
@@ -376,7 +458,9 @@ $("dlg-settings").addEventListener("close", () => {
 
 // ---------- Startup ----------
 (async () => {
-  docs = await dbAll();
+  docs = await dbAll("docs");
+  sessions = await dbAll("sessions");
   renderDocs();
-  transcript.forEach(makeBox);
+  const saved = sessions.find((s) => String(s.id) === localStorage.getItem("currentSession"));
+  await openSession(saved || (await createSession(defaultTitle())));
 })();
