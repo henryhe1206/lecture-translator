@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="课堂翻译">
+<title>课堂实时翻译</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <button id="btn-record" class="primary">开始听课</button>
+  <button id="btn-summary">课堂总结</button>
+  <button id="btn-handouts">讲义</button>
+  <button id="btn-settings">设置</button>
+  <label class="chk"><input type="checkbox" id="chk-en" checked> 英文</label>
+  <button id="btn-clear">清空</button>
+</header>
+
+<div id="sub-list"></div>
+<div id="interim"></div>
+
+<dialog id="dlg-settings">
+  <form method="dialog">
+    <h3>设置</h3>
+    <label>Claude API Key<input type="password" id="set-key" autocomplete="off"></label>
+    <label>翻译模型<input type="text" id="set-translate-model"></label>
+    <label>总结 / 讲义要点模型<input type="text" id="set-summary-model"></label>
+    <label>识别语言<input type="text" id="set-lang"></label>
+    <p class="hint">Key 只保存在这台设备的浏览器本地。</p>
+    <menu>
+      <button id="btn-save" value="save">保存</button>
+      <button value="cancel">取消</button>
+    </menu>
+  </form>
+</dialog>
+
+<dialog id="dlg-handouts">
+  <h3>讲义</h3>
+  <p class="hint">上传上课会用到的 PDF。程序会提取术语和内容要点，让翻译更准确。</p>
+  <label class="file-btn">上传 PDF（可多选）<input type="file" id="file-pdf" accept="application/pdf" multiple hidden></label>
+  <ul id="doc-list"></ul>
+  <menu><button id="btn-handouts-close">关闭</button></menu>
+</dialog>
+
+<dialog id="dlg-summary">
+  <h3>课堂总结</h3>
+  <div id="summary-body"></div>
+  <menu>
+    <button id="btn-summary-copy">复制</button>
+    <button id="btn-summary-close">关闭</button>
+  </menu>
+</dialog>
+
+<div id="status"></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>
