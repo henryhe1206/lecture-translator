@@ -175,7 +175,8 @@ async function openSession(s) {
   session = s;
   localStorage.setItem("currentSession", String(s.id));
   $("session-title").textContent = `当前课程：${s.title}`;
-  renderCards(true);
+  subList.scrollTop = 0;
+  renderCards();
 }
 
 $("btn-new").onclick = async () => {
@@ -255,8 +256,8 @@ function groupParagraphs(entries) {
 }
 
 // Redraws the paragraph cards of the current session from its entries.
-function renderCards(toEnd = false) {
-  const nearBottom = subList.scrollHeight - subList.scrollTop - subList.clientHeight < 80;
+function renderCards() {
+  const scrollTop = subList.scrollTop;
   const cards = groupParagraphs(session.entries).map((group) => {
     const card = document.createElement("div");
     card.className = "sub";
@@ -277,11 +278,11 @@ function renderCards(toEnd = false) {
   });
   subList.replaceChildren(...cards);
   layoutCards();
-  if (toEnd || nearBottom) scrollReviewToEnd();
+  subList.scrollTop = scrollTop;
 }
 
-// Marks each card with its distance from the newest one. The live view orders (newest first),
-// styles and hides cards by it.
+// Marks each card with its distance from the newest one. Both views order cards newest first;
+// the live view also styles and hides them by it.
 function layoutCards() {
   const n = subList.children.length;
   for (let i = 0; i < n; i++) {
@@ -290,11 +291,6 @@ function layoutCards() {
     card.dataset.age = age < LIVE_CARDS ? age : "gone";
     card.style.order = age;
   }
-}
-
-// Only the review view scrolls; the live view always shows its top.
-function scrollReviewToEnd() {
-  if (subList.classList.contains("review")) subList.scrollTop = subList.scrollHeight;
 }
 
 let lastResultAt = 0;     // time of the latest recognition result
@@ -494,7 +490,7 @@ $("btn-summary-copy").onclick = async () => {
 $("chk-en").addEventListener("change", (e) => subList.classList.toggle("hide-en", !e.target.checked));
 $("chk-review").addEventListener("change", (e) => {
   subList.classList.toggle("review", e.target.checked);
-  subList.scrollTop = e.target.checked ? subList.scrollHeight : 0;
+  subList.scrollTop = 0;
 });
 
 // ---------- Settings ----------
